@@ -4,7 +4,7 @@ from casacore.tables     import table
 from numpy.fft           import fftshift, fft2, fftfreq
 
 # Path to the MeasurementSet (MS)
-data_MS = "./Data/ILTJ125911.17+351954.5_143MHz_uv.dp3-concat"
+data_MS = "../Data/ILTJ125911.17+351954.5_143MHz_uv.dp3-concat"
 
 # Open MS
 data    = table(data_MS)
@@ -25,8 +25,8 @@ antennas.close()
 
 nscale   = 8
 n_pol    = 0
-ant1     = 5
-ant2     = 55
+ant1     = 30
+ant2     = 72
 
 if (ant1 >= ant2):
     print(f"Error: Ant1: {ant1} must be smaller than Ant2: {ant2}")
@@ -40,7 +40,8 @@ ff2 = len(freq)-1
 tt1 = 0*nnn
 tt2 = tt1+nnn
 
-vis_new = t1.getcol('DATA')[tt1:tt2+1, ff1:ff2+1, n_pol]   # (channel, pol [RR, RL, LR, LL])
+vis_n = t1.getcol('DATA')[tt1:tt2+1, ff1:ff2+1, n_pol]   # (channel, pol [RR, RL, LR, LL])
+vis_new = np.exp(1j*np.angle(vis_n))
 flg = t1.getcol('FLAG')[tt1:tt2+1, ff1:ff2+1, n_pol]   # (channel, pol [RR, RL, LR, LL])
 
 ####### FFT ######

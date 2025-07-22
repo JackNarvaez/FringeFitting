@@ -7,18 +7,18 @@ from matplotlib.gridspec import GridSpec
 from scipy.fft           import fftshift, fft2, fftfreq
 from scipy.optimize      import minimize, least_squares, differential_evolution
 
-INI_TIME    = tm.time()
+INI_TIME = tm.time()
 FLT_EPSILON = np.finfo(float).eps
-M_PI    = np.pi
-M_PI2   = 2*np.pi
-M_PIP2  = np.pi/2
+M_PI = np.pi
+M_PI2 = 2*np.pi
+M_PIP2 = np.pi/2
 
+########## 0 READING DATA ##########
 def wrap_phase(phase):
     """Fast phase wrapping"""
     return ((phase + M_PI) % (M_PI2)) - M_PI
 
 def snr_aips(peak, sumw_, sumww_, xcount_):
-    """Estimate signal-to-noise ratio based on AIPS formula."""
     if (peak > 0.999*sumw_):
         peak = 0.999*sumw_
         print("peak > 0.999*sumw_")
@@ -34,22 +34,19 @@ def snr_aips(peak, sumw_, sumww_, xcount_):
 
 def SNR(ampl_FFT):
     """Estimate signal-to-noise ratio (basic max/mean)."""
-    return np.max(ampl_FFT) / (np.mean(ampl_FFT) + FLT_EPSILON)
+    return np.max(ampl_FFT) / (np.mean(ampl_FFT) + 1e-10)
 
-def baseline_ij(ant1, ant2, sgn):
-    """ Compute baseline index """
+def baseline_ij(ant1, ant2):
     if (ant2 > ant1):
-        return (ant2*(ant2+sgn))//2 + ant1
-    elif (ant2 < ant1):
-        return (ant1*(ant1+sgn))//2 + ant2
+        return (ant2*(ant2-1))//2 + ant1
+    elif (ant1 > ant2):
+        return (ant1*(ant1-1))//2 + ant2
     else:
-        if sgn>0:
-            return (ant1*(ant1+sgn))//2 + ant2
-        else:
-            print(f"Error: Ant1: {ant1} must be different to Ant2: {ant2}")
-            exit()
+        print("ERROR: ANT1 == ANT2")
+        return None
 
 def plot_phase(phase, wgt_glb, time, freq, nbins_time, nbins_freq, nbins_phase = 50, Baselinetitle="", showw=False):
+        # Create figure and grid layout
         fig = plt.figure(figsize=(10, 6))
         fig.suptitle(f"Baseline: {Baselinetitle}")
         gs  = GridSpec(3, 3, width_ratios=[8, 1, 1], height_ratios=[1, 1, 4],
@@ -62,8 +59,7 @@ def plot_phase(phase, wgt_glb, time, freq, nbins_time, nbins_freq, nbins_phase =
         ax_top.set_xticks([])
 
         ax_top2     = fig.add_subplot(gs[1, 0])
-        temp_time   = np.linspace(time[0], time[-1], len(time))
-        time_rep    = np.repeat(temp_time[:, np.newaxis], phase.shape[1], axis=1).flatten()
+        time_rep    = np.repeat(time[:, np.newaxis], phase.shape[1], axis=1).flatten()
 
         if wgt_glb is not None:
             wgt = wgt_glb.flatten()
@@ -115,7 +111,7 @@ def plot_phase(phase, wgt_glb, time, freq, nbins_time, nbins_freq, nbins_phase =
             plt.show()
 
 class LOAD_MS:
-    def __init__(self, ms_path, npol=0, SpW=0, refant=0, tints=8, selfbls=False, vlbi="lofar"):
+    def __init__(self, ms_path, npol=0, refant=0):
         self.ms_path = ms_path
         self.n_pol   = npol
 
@@ -126,87 +122,34 @@ class LOAD_MS:
         self.time -= self.t0
         self.nt    = len(self.time)
         self.dt    = self.time[1]-self.time[0]
-        self.tints = tints
-
-        # Time Intervals
-        DT = np.diff(self.time)
-        tindex = [0]
-        tindex.extend(np.where(DT > self.dt)[0] + 1)
-        tindex.append(self.nt)
-
-        Numdivs = len(tindex)-1
-
-        if (Numdivs > 1) and (Numdivs < 3*self.tints):  ### To keep Number of intervals small.
-            print("Variable time intervals")
-            self.tints = Numdivs
-            self.time_edgs = tindex
-        else:
-            print("Uniform time intervals")
-            self.time_edgs = np.arange(0, self.nt, self.nt//self.tints)
-            self.time_edgs[-1] = self.nt
-
-        print(f"Total Time steps: {self.nt}")
-        print(f"Time Intervals  : {self.tints}")
-        print(f"Interval's Edges: {self.time_edgs}")
-
-        self.use_weight_spectrum = False
-        if "WEIGHT_SPECTRUM" in self.data.colnames():
-            self.use_weight_spectrum = True
 
         # Load frequency info
         spectral_window = table(f"{ms_path}/SPECTRAL_WINDOW")
-        self.nSpW = len(spectral_window)
-        self.SpW  = SpW
         self.freq = spectral_window[0]['CHAN_FREQ']
         self.nf   = len(self.freq)
+        self.f0   = np.mean(self.freq)
         self.df   = self.freq[1] - self.freq[0]
         self.Dfrq = self.freq - self.freq[0]
         spectral_window.close()
-
-        if (self.SpW >= self.nSpW):
-            print(f"SpW = {self.SpW} must be smaller than {self.nSpW}.")
-            exit()
 
         # Load antenna info
         antennas     = table(f"{ms_path}/ANTENNA")
         self.nameant = antennas.getcol("NAME")
         self.nant    = len(self.nameant)
-        self.selfbls = 1 if selfbls else -1
-        self.n_bls   = self.nant*(self.nant + self.selfbls)//2
+        self.n_bls   = self.nant*(self.nant-1)//2
         antennas.close()
 
-        self.refant  = refant
+        self.refant = refant
         self.baseline_ok = np.zeros(self.n_bls, dtype=bool)
-
-        # MS Format
-        self.vlbi    = vlbi
-        self.order_bls = np.arange(0, self.n_bls)
-        if self.vlbi=="lofar":
-            print("VLBI MS Format: lofar")
-        elif self.vlbi=="evn":
-            print("VLBI MS Format: evn")
-            Tab = self.data.query(query=f"DATA_DESC_ID == {self.SpW}", offset=0, limit=self.n_bls, columns="ANTENNA1,ANTENNA2")
-            antenna1 = Tab.getcol('ANTENNA1')
-            antenna2 = Tab.getcol('ANTENNA2')
-            Tab.close()
-            for irow in range(self.n_bls):
-                self.order_bls[baseline_ij(antenna1[irow], antenna2[irow], self.selfbls)]=irow
-        else:
-            print(f"ERROR: unknown VLBI MS Format: {self.vlbi}. Must be 'lofar' or 'evn'")
-            exit()
 
     def close(self):
         self.data.close()
     
     def load_baseline(self, ant1, ant2, npol=0, Data=True, Wgt=True, Cal=False, Model=False):
-        if (ant1 > ant2):
+        if (ant1 >= ant2):
             print(f"Error: Ant1: {ant1} must be smaller than Ant2: {ant2}")
             exit()
-        elif (ant1==ant2):
-            if self.selfbls < 0:
-                print(f"Error: Ant1: {ant1} must be different to Ant2: {ant2}")
-                exit()
-        t1   = self.data.query(f'DATA_DESC_ID == {self.SpW} AND ANTENNA1 == {ant1} AND ANTENNA2 == {ant2}')
+        t1   = self.data.query(f'ANTENNA1 == {ant1} AND ANTENNA2 == {ant2}')
         flg  = t1.getcol('FLAG')[:, :, npol]
 
         results = []
@@ -215,12 +158,7 @@ class LOAD_MS:
             vis[flg] = 0.0
             results.append(vis)
         if Wgt:
-            if self.use_weight_spectrum:
-                wgt = t1.getcol('WEIGHT_SPECTRUM')[:, :, npol]
-            else:
-                # Use WEIGHT and broadcast it across channels
-                weights = t1.getcol('WEIGHT')[:, npol]
-                wgt = weights[:, np.newaxis].repeat(self.nf, axis=1)
+            wgt = t1.getcol('WEIGHT_SPECTRUM')[:, :, npol]
             wgt[flg] = 0.0
             results.append(wgt)
         if Cal:
@@ -246,51 +184,25 @@ class LOAD_MS:
             ntot *= len(self.n_pol)
         t_offset = tini*self.n_bls
         t_limit  = (tend-tini)*self.n_bls
-        cols = "FLAG,ANTENNA1,ANTENNA2"
-
-        if self.vlbi == "lofar":
-            cols = cols + ",UVW"
-
-        Tab = self.data.query(query=f"DATA_DESC_ID == {self.SpW}", offset=t_offset, limit=t_limit, columns=cols)
-
-        NRows = Tab.nrows()
-        if (NRows != (tend-tini)*self.n_bls):
-            print(f"Nrows={NRows} must be equal to tloc*#Baselines={(tend-tini)*self.n_bls}")
-            exit()
-
+        Tab = self.data.query(offset=t_offset, limit=t_limit, columns="FLAG,UVW")
+        uvw = Tab.getcol('UVW')[:]
         flg = Tab.getcol('FLAG')[:, :, self.n_pol]
-
-        if self.vlbi == "lofar":
-            uvw = Tab.getcol('UVW')[:self.n_bls]
-            antenna1 = Tab.getcol('ANTENNA1')[:self.n_bls]
-            antenna2 = Tab.getcol('ANTENNA2')[:self.n_bls]
-        else:
-            antenna1 = Tab.getcol('ANTENNA1')
-            antenna2 = Tab.getcol('ANTENNA2')
-
         Tab.close()
         temp_sum = np.zeros(self.n_bls)
+        for irow in range(t_limit):
+            bij = irow % self.n_bls;
+            temp_sum[bij] += np.sum(flg[irow])
 
-        if self.vlbi=="lofar":
-            for irow in range(t_limit):
-                bij = irow % self.n_bls;
-                temp_sum[bij] += np.sum(flg[irow])
-            for irow in range(self.n_bls):
-                cond1 = np.sqrt(uvw[irow, 0]**2 + uvw[irow, 1]**2 + uvw[irow, 2]**2) > self.uvw_th
-                ant1  = antenna1[irow]
-                ant2  = antenna2[irow]
-                cond2 = (ant1 == self.refant) or (ant2 == self.refant)
-                if not (cond1 or cond2):
-                    temp_sum[irow] = ntot
-        else:
-            for irow in range(t_limit):
-                bij = baseline_ij(antenna1[irow], antenna2[irow], self.selfbls)
-                temp_sum[bij] += np.sum(flg[irow])
         for iant in range(self.nant):
-            for jant in range(iant+1, self.nant):
-                bij   = baseline_ij(iant, jant, self.selfbls)
-                ok = temp_sum[bij]/ntot < self.flg_th
-                self.baseline_ok[bij] = ok
+            for jant in range(self.nant):
+                if iant == jant:
+                    continue
+                bij   = baseline_ij(iant, jant)
+                cond1 = np.sqrt(uvw[bij, 0]**2 + uvw[bij, 1]**2 + uvw[bij, 2]**2) > self.uvw_th
+                cond2 = (iant == self.refant or jant==self.refant)
+                if cond1 or cond2:
+                    ok = temp_sum[bij]/ntot < self.flg_th
+                    self.baseline_ok[bij] = ok
 
         print("------------------------------\n")
 
@@ -301,37 +213,10 @@ class LOAD_MS:
         t_limit  = tloc*self.n_bls
 
         print("\n ------- LOADING DATA ------- ")
-        cols = "DATA,FLAG"
-        if self.use_weight_spectrum:
-            print("Using column: WEIGHT_SPECTRUM")
-            cols = cols + ",WEIGHT_SPECTRUM"
-        else:
-            cols = cols + ",WEIGHT"
-            print("Using column: WEIGHT")
-        
-        if self.vlbi=="evn":
-            cols = cols + ',ANTENNA1,ANTENNA2'
-
-        Tab = self.data.query(f"DATA_DESC_ID == {self.SpW}", offset=t_offset, limit=t_limit, columns=cols)
-
-        NRows = Tab.nrows()
-        if (NRows != tloc*self.n_bls):
-            print(f"Nrows={NRows} must be equal to tloc*#Baselines={tloc*self.n_bls}")
-            exit()
-
+        Tab = self.data.query(offset=t_offset, limit=t_limit, columns="DATA,FLAG,WEIGHT_SPECTRUM")
         temp_vis = Tab.getcol('DATA')[:, :, self.n_pol]
         temp_flg = Tab.getcol('FLAG')[:, :, self.n_pol]
-        if self.vlbi == "evn":
-            antenna1 = Tab.getcol('ANTENNA1')
-            antenna2 = Tab.getcol('ANTENNA2')
-
-        # Check for WEIGHT_SPECTRUM
-        if self.use_weight_spectrum:
-            temp_wgt = Tab.getcol('WEIGHT_SPECTRUM')[:, :, self.n_pol]
-        else:
-            # Use WEIGHT and broadcast it across channels
-            weights = Tab.getcol('WEIGHT')[:, self.n_pol]
-            temp_wgt = weights[:, np.newaxis, :].repeat(self.nf, axis=1)
+        temp_wgt = Tab.getcol('WEIGHT_SPECTRUM')[:, :, self.n_pol]
         Tab.close()
 
         # Combine correlations
@@ -346,7 +231,7 @@ class LOAD_MS:
             print("Combining correlations: Stokes I")
             temp_flg = np.all(temp_flg, axis=2)
             temp_vis = 0.5*np.sum(temp_vis, axis=2)
-            temp_wgt = 0.5*np.sum(temp_wgt, axis=2)
+            temp_wgt = np.sum(temp_wgt, axis=2)
         else:
             print(f"corrcomb={corrcomb} is not defined.")
             exit()
@@ -357,40 +242,26 @@ class LOAD_MS:
 
         print("Ordering data. ")
 
-        if self.vlbi=="lofar":
-            for bl in range(self.n_bls):
-                if self.baseline_ok[bl]:
-                    for tt in range(tloc):
-                        orig_row = tt * self.n_bls + bl
-                        new_row  = bl * tloc + tt
-                        self.vis[new_row] = np.exp(1j*np.angle(temp_vis[orig_row]))
-                        self.wgt[new_row] = temp_wgt[orig_row]
-                        flg[new_row]      = temp_flg[orig_row]
-        else:
-            for nrow in range(NRows):
-                if (antenna1[nrow] == antenna2[nrow]):
-                    continue
-                tt = nrow // self.n_bls
-                bl = baseline_ij(antenna1[nrow], antenna2[nrow], self.selfbls)
-                if self.baseline_ok[bl]:
+        for bl in range(self.n_bls):
+            if self.baseline_ok[bl]:
+                for tt in range(tloc):
+                    orig_row = tt * self.n_bls + bl
                     new_row  = bl * tloc + tt
-                    self.vis[new_row] = np.exp(1j*np.angle(temp_vis[nrow]))
-                    self.wgt[new_row] = temp_wgt[nrow]
-                    flg[new_row]      = temp_flg[nrow]
-
+                    self.vis[new_row] = np.exp(1j*np.angle(temp_vis[orig_row]))
+                    self.wgt[new_row] = temp_wgt[orig_row]
+                    flg[new_row]      = temp_flg[orig_row]
+        
         self.vis[flg] = 0.0
         self.wgt[flg] = 0.0
         
         print("------------------------------\n")
 
         del temp_vis, temp_flg, temp_wgt, flg
-        if self.vlbi == "evn":
-            del antenna1, antenna2
         gc.collect()
 
     def plot_phase_local(self, ant1, ant2, tini, tend, vis_cal=None, vis_wgt=None, showw=False):
 
-        baseline = baseline_ij(ant1, ant2, self.selfbls)
+        baseline = (ant2*(ant2-1))//2 + ant1
         tloc = tend-tini
         time_loc = self.time[tini:tend]
         if (vis_cal is None):
@@ -409,15 +280,8 @@ class LOAD_MS:
                    nbins_time=len(time_loc), nbins_freq=self.nf, nbins_phase = 50, Baselinetitle=baselinetitle, showw=showw)
 
     def plot_phase_global(self, ant1, ant2, npol):
-        if len(npol)==1:
-            print(f"1 Pol: {npol}")
-            vis_global, wgt_global, cal_global, mod_phase = self.load_baseline(ant1, ant2, npol=npol, Data=True, Wgt=True, Cal=True, Model=True)
-        else:
-            vis_global1, wgt_global1, cal_global1, mod_phase = self.load_baseline(ant1, ant2, npol=npol[0], Data=True, Wgt=True, Cal=True, Model=True)
-            vis_global2, wgt_global2, cal_global2 = self.load_baseline(ant1, ant2, npol=npol[1], Data=True, Wgt=True, Cal=True, Model=False)
-            vis_global = 0.5*(vis_global1+vis_global2)
-            cal_global = 0.5*(cal_global1+cal_global2)
-            wgt_global = 0.5*(wgt_global1+wgt_global2)
+
+        vis_global, wgt_global, cal_global, mod_phase = self.load_baseline(ant1, ant2, npol=npol, Data=True, Wgt=True, Cal=True, Model=True)
         vis_phase = np.angle(vis_global)
         cal_phase = np.angle(cal_global)
         baselinetitle = f"{self.nameant[ant1]} - {self.nameant[ant2]}"
@@ -428,38 +292,43 @@ class LOAD_MS:
         plot_phase(mod_phase, None, self.time, self.freq,\
                    nbins_time=self.nt, nbins_freq=self.nf, nbins_phase = 50, Baselinetitle=baselinetitle + " [Model]", showw=True)
 
+
 class FringeFitting:
-    def __init__(self, ms, nscale=8, tunit=1e3, funit=1e9):
+    def __init__(self, ms, tints=8, nscale=8, tunit=1e3, funit=1e9):
         """
-        ms: LOAD_MS class object
+        ms: an instance of a class (like LOAD_MS)
         nscale: padding factor for FFT
         tunit: time unit conversion (e.g., to ms)
         funit: freq unit conversion (e.g., to MHz or GHz)
         """
-
         self.nscale = nscale
         self.tunit  = tunit
         self.funit  = funit
+        self.tints  = tints
+        self.time_edgs = np.arange(0, ms.nt, ms.nt//self.tints)
+        self.time_edgs[-1] = ms.nt
         self.params = np.zeros((ms.nant, 3))
         self.sumw_  = np.zeros((ms.nant))
         self.snr_   = np.zeros((ms.nant))
         self.snr1_  = np.zeros((ms.nant))
 
+        self.refant = ms.refant
+
         # Constrains
         self.min_delay = self.funit * 0.5/(ms.freq[-1]-ms.freq[0])
         self.max_delay = self.funit * 0.5/ms.df
-        self.min_rate  = self.tunit * 0.5/(ms.time[ms.time_edgs[1]] - ms.time[ms.time_edgs[0]])
+        self.min_rate  = self.tunit * 0.5/(ms.time[self.time_edgs[1]] - ms.time[self.time_edgs[0]])
         self.max_rate  = self.tunit * 0.5/ms.dt
 
-        print(f"Reference Antenna: {ms.nameant[ms.refant]}")
+        print(f"Reference Antenna: {ms.nameant[self.refant]}")
 
-    def FFT_init_ij(self, ms, ant, nt_loc, fringe_rate, delay):
+    def FFT_init_ij_old(self, ms, ant, nt_loc, fringe_rate, delay):
         """Compute fringe-rate, delay, and phase estimates over time-frequency blocks."""
 
-        ant1, ant2 = (ant, ms.refant) if ms.refant > ant else (ms.refant, ant)
-        sgn = -1 if ant < ms.refant else 1
+        ant1, ant2 = (ant, self.refant) if self.refant > ant else (self.refant, ant)
+        sgn = -1 if ant < self.refant else 1
 
-        bl_ij = baseline_ij(ant1, ant2, ms.selfbls)
+        bl_ij = ant2*(ant2-1)//2 + ant1
 
         if ms.baseline_ok[bl_ij]:
 
@@ -468,14 +337,10 @@ class FringeFitting:
 
             # 2D FFT
             F_sub = fftshift(fft2(ms.vis[tt1:tt2], norm='ortho', s=[self.nscale*nt_loc, self.nscale*ms.nf]))
-            amp_loc_sh = F_sub.shape
-
-            #IMPLEMENT CONSTRAINS
-            F_sub[amp_loc_sh[0]//2, amp_loc_sh[1]//2] = 0.0
-
             ampli_loc = np.abs(F_sub)
 
             # Find peak
+            amp_loc_sh = ampli_loc.shape
             r_idx, tau_idx = np.unravel_index(np.argmax(ampli_loc), amp_loc_sh)
 
             self.params[ant, 0] = sgn*np.angle(F_sub[r_idx, tau_idx])
@@ -486,40 +351,15 @@ class FringeFitting:
             sgn_r = -1 if rate_ini < 0 else 1
             sgn_d = -1 if delay_ini < 0 else 1
 
-            # -------------------------------------------------------------------------------------------------#
-            # if (ant1==0 and ant2==10):
-            #     print(ms.vis[tt1:tt2].shape)
+            if np.abs(rate_ini) < self.min_rate:
+                rate_ini = sgn_r*self.min_rate
+            elif np.abs(rate_ini) > self.max_rate:
+                rate_ini = sgn_r*self.max_rate
 
-            #     plt.figure(figsize=(8, 6))
-            #     plt.title(f"Delay-Fringe Spectrum for Baseline {ant1}-{ant2}")
-            #     plt.imshow(ampli_loc.T, aspect='auto', origin='lower', norm="log",
-            #                extent=[fringe_rate[0], fringe_rate[-1], delay[0], delay[-1]], vmax=4, vmin=1e-5,
-            #                cmap='plasma')
-            #     plt.xlabel("Fringe Rate (Hz)")
-            #     plt.ylabel(r"Delay ($\mu$s)")
-            #     plt.colorbar(label="Amplitude")
-            #     plt.show()
-
-            #     plt.figure(figsize=(8, 6))
-            #     plt.title(f"Delay-Fringe Spectrum for Baseline {ant1}-{ant2}")
-            #     plt.imshow(np.angle(ms.vis[tt1:tt2]).T, aspect='auto', origin='lower', cmap="twilight",
-            #             )
-            #     plt.xlabel("Time")
-            #     plt.ylabel(r"Freq")
-            #     plt.colorbar(label="Phase")
-            #     plt.show()
-
-            # if np.abs(rate_ini) < self.min_rate:
-            #     rate_ini = sgn_r*self.min_rate
-            # elif np.abs(rate_ini) > self.max_rate:
-            #     rate_ini = sgn_r*self.max_rate
-
-            # if np.abs(delay_ini) < self.min_delay:
-            #     delay_ini = sgn_d*self.min_delay
-            # elif np.abs(delay_ini) > self.max_delay:
-            #     delay_ini = sgn_d*self.max_delay
-            # ----------------------------------------------------------------------------------------------- #
-
+            if np.abs(delay_ini) < self.min_delay:
+                delay_ini = sgn_d*self.min_delay
+            elif np.abs(delay_ini) > self.max_delay:
+                delay_ini = sgn_d*self.max_delay
             self.sumw_[ant] = np.sum(ms.wgt[tt1:tt2])
             sumww_ = np.sum(ms.wgt[tt1:tt2]**2)
             xcount_ = amp_loc_sh[0]*amp_loc_sh[1]
@@ -536,18 +376,102 @@ class FringeFitting:
 
         print(f"Baseline: {ant1}-{ant2} \t phase: {self.params[ant, 0]:.2f} rad \t rate: {self.params[ant, 1]:.2f} mHz \t delay: {self.params[ant, 2]:.2f} ns \t snr_mean {self.snr1_[ant]:.2f}\t snr_aips: {self.snr_[ant]:.2f}")
 
+    def FFT_init_ij(self, ms, ant, nt_loc, fringe_rate, delay):
+        ant1, ant2 = (ant, self.refant) if self.refant > ant else (self.refant, ant)
+        sgn = -1 if ant < self.refant else 1
+
+        bl_ij = ant2*(ant2-1)//2 + ant1
+
+                    # FFT-derived limits
+        df = ms.df
+        nf_new = ms.nf * self.nscale
+        max_delay = 0.5 / df
+        min_delay = -0.5 / df
+        bw = df * nf_new
+        dt = ms.dt
+        nt_new = nt_loc * self.nscale
+        f0 = ms.f0
+        max_rate = 0.5 / (dt * f0)
+        min_rate = -0.5 / (dt * f0)
+        width = dt * nt_new * f0
+
+        if ms.baseline_ok[bl_ij]:
+            tt1 = bl_ij * nt_loc
+            tt2 = tt1 + nt_loc
+
+            # FFT
+            F_sub = fftshift(fft2(ms.vis[tt1:tt2], norm='ortho', s=[self.nscale * nt_loc, self.nscale * ms.nf]))
+            ampli_loc = np.abs(F_sub)
+
+            # Convert to bin indices (FFT grid)
+            i0 = int(min_delay * bw)
+            i1 = int(max_delay * bw)
+            if i0 > i1:
+                i0, i1 = i1, i0
+            if i1 == i0:
+                i1 += 1
+            i0_shifted = (i0 + nf_new // 2) % nf_new
+            i1_shifted = (i1 + nf_new // 2) % nf_new
+
+            j0 = int(min_rate * width)
+            j1 = int(max_rate * width)
+            if j0 > j1:
+                j0, j1 = j1, j0
+            if j1 == j0:
+                j1 += 1
+            j0_shifted = (j0 + nt_new // 2) % nt_new
+            j1_shifted = (j1 + nt_new // 2) % nt_new
+
+            if i0_shifted < i1_shifted:
+                delay_bins = slice(i0_shifted, i1_shifted)
+            else:
+                delay_bins = np.r_[np.arange(i0_shifted, nf_new), np.arange(0, i1_shifted)]
+
+            if j0_shifted < j1_shifted:
+                rate_bins = slice(j0_shifted, j1_shifted)
+            else:
+                rate_bins = np.r_[np.arange(j0_shifted, nt_new), np.arange(0, j1_shifted)]
+
+            # Extract and search in region
+            ampli_region = ampli_loc[np.ix_(rate_bins, delay_bins)]
+
+            local_idx = np.argmax(ampli_region)
+            local_r_idx, local_tau_idx = np.unravel_index(local_idx, ampli_region.shape)
+            r_idx = (j0 + local_r_idx) % nt_new
+            tau_idx = (i0 + local_tau_idx) % nf_new
+
+            # Phase at peak
+            self.params[ant, 0] = sgn * np.angle(F_sub[r_idx, tau_idx])
+
+            rate_ini = sgn * fringe_rate[r_idx] * self.tunit
+            delay_ini = sgn * delay[tau_idx] * self.funit
+
+            self.sumw_[ant] = np.sum(ms.wgt[tt1:tt2])
+            sumww_ = np.sum(ms.wgt[tt1:tt2] ** 2)
+            xcount_ = ampli_region.size
+
+            self.snr_[ant] = snr_aips(np.abs(F_sub[r_idx, tau_idx]), self.sumw_[ant], sumww_, xcount_)
+            self.snr1_[ant] = SNR(ampli_region)
+        else:
+            rate_ini = sgn * min_rate
+            delay_ini = sgn * min_delay
+
+        self.params[ant, 1] = rate_ini
+        self.params[ant, 2] = delay_ini
+
+        print(f"Baseline: {ant1}-{ant2} \t phase: {self.params[ant, 0]:.2f} rad \t rate: {self.params[ant, 1]:.2f} Hz \t delay: {self.params[ant, 2]:.2f} s \t snr_mean {self.snr1_[ant]:.2f}\t snr_aips: {self.snr_[ant]:.2f}")
+
     def FFT_init_global(self, ms, tint):
-        """Compute fringe-rate, delay, and phase estimates over time-frequency blocks for all baselines w.r.t. refant."""
         print("\n ------- INITIAL GUESS ------- ")
         print("Constrains")
         print(f"RATE: min: {self.min_rate:.2f} mHz \t max: {self.max_rate:.2f} mHz")
         print(f"DELAY: min: {self.min_delay:.2f} ns \t max: {self.max_delay:.2f} ns")
         print("------------------------------\n")
-        nt_loc      =  ms.time_edgs[tint+1]-ms.time_edgs[tint]
+        nt_loc      =  self.time_edgs[tint+1]-self.time_edgs[tint]
         fringe_rate = fftshift(fftfreq(self.nscale * nt_loc, ms.dt))  # Hz
         delay       = fftshift(fftfreq(self.nscale * ms.nf, ms.df))
         for iant in range(ms.nant):
-            if (ms.refant == iant):
+            if (self.refant == iant):
                 continue
             self.FFT_init_ij(ms, iant, nt_loc, fringe_rate, delay)
         print("Initial Guess set successfully\n")
@@ -558,13 +482,13 @@ class FringeFitting:
 
         Parameters:
             vis_loc (ndarray): Observed visibility data for a baseline.
-            wgt_loc (ndarray): Weights for a baseline.
-            Dt (ndarray) : Time array (1D).
-            Df (ndarray) : Frequency array (1D).
-            prms (array): Parameters for baseline [phase, rate, delay].
+            time (ndarray): Time array (1D).
+            freq (ndarray): Frequency array (1D).
+            prms0 (array): Parameters (phi0, r, tau) of antenna 0.
+            prms1 (array): Parameters of antenna 1.
 
         Returns:
-            float: Sum of squared weighted- phase errors.
+            float: Sum of squared phase errors.
         """
         phi0  = wrap_phase(prms[0])
         rDt   = (prms[1]/self.tunit)*Dt
@@ -580,10 +504,9 @@ class FringeFitting:
         Cost function for least-squares optimization of fringe parameters across all baselines.
 
         Parameters:
-            params (ndarray): Flattened array of parameters [phi0, r, tau] for all antennas.
-            ms: LOAD_MS class object
-            nt_local: Number of timesteps for the current interval
-            time_n: Time array for the current interval.
+            prms (ndarray): Flattened array of parameters [phi0, r, tau] for all antennas.
+            vis_01, vis_02, vis_12 (ndarray): Visibilities for the three baselines.
+            time, freq (ndarray): Time and frequency axes.
 
         Returns:
             float: Sum of squared residuals across all three baselines.
@@ -594,7 +517,7 @@ class FringeFitting:
             prmsi = params[3*iant:3*iant+3]
             for jant in range(iant+1, ms.nant):
                 bl_ij = (jant*(jant-1))//2 + iant
-                if ~ms.baseline_ok[bl_ij]:
+                if not ms.baseline_ok[bl_ij]:
                     continue
                 x0[3*bl_ij:3*bl_ij+3] = params[3*jant:3*jant+3] - prmsi
 
@@ -621,8 +544,8 @@ class FringeFitting:
             upp_bounds.extend([ M_PI, self.max_rate,  self.max_delay])  # phi0, r, tau
 
         x0   = self.params.flatten()
-        tini = ms.time_edgs[tint]
-        tend = ms.time_edgs[tint+1]
+        tini = self.time_edgs[tint]
+        tend = self.time_edgs[tint+1]
         nt_loc   =  tend-tini
         time_new = ms.time[tini:tend]-ms.time[tini]
         result  = least_squares(self.GlobalCost, x0, bounds=(low_bounds, upp_bounds), args=(ms, nt_loc, time_new), max_nfev=maxiter, verbose=2)
@@ -633,21 +556,25 @@ class FringeFitting:
         print("------------------------------\n")
 
 
-    def calibrate(self, tini, tend, ms, model=False):
-        """ Save calibrated data in MS table"""
-        tloc     = tend-tini
+    def calibrate(self, tini, tend, ms, tint, model=False):
+        tloc = tend-tini
         t_offset = tini*ms.n_bls
         t_limit  = tloc*ms.n_bls
         
         print("\n ------- DATA CALIBRATION ------- ")
-
-        Tab = ms.data.query(query=f"DATA_DESC_ID == {ms.SpW}", offset=t_offset, limit=t_limit, columns="DATA,FLAG")
+        Tab = ms.data.query(offset=t_offset, limit=t_limit, columns="DATA,FLAG")
         temp_vis = Tab.getcol('DATA')
         temp_flg = Tab.getcol('FLAG')
-        n_rows   = Tab.nrows()
+        n_rows = temp_vis.shape[0]
         Tab.close()
 
+        # Ensure 'CALIBRATED_DATA' column exists
         Tab_cal  = table(ms.ms_path, readonly=False)
+        if False:#(tint == 0):
+            if 'CALIBRATED_DATA' in Tab_cal.colnames():
+                Tab_cal.removecols('CALIBRATED_DATA')
+            if 'CALIBRATED_MODEL' in Tab_cal.colnames():
+                Tab_cal.removecols('CALIBRATED_MODEL')
 
         if 'CALIBRATED_DATA' not in Tab_cal.colnames():
             data_desc = Tab_cal.getcoldesc('DATA')
@@ -656,7 +583,7 @@ class FringeFitting:
         if 'CALIBRATED_MODEL' not in Tab_cal.colnames():
             desc = makearrcoldesc(columnname='CALIBRATED_MODEL',
                           value=0.,
-                          valuetype='float',
+                          valuetype='float32',
                           ndim=1,
                           shape=[ms.nf])  # one phase per channel
             tabdesc = maketabdesc(desc)
@@ -669,31 +596,22 @@ class FringeFitting:
             for iant in range(ms.nant):
                 prmsi = self.params[iant]
                 for jant in range(iant+1, ms.nant):
-                    bl_ij = baseline_ij(iant, jant, ms.selfbls)
+                    bl_ij = baseline_ij(iant, jant)
                     if ~ms.baseline_ok[bl_ij]:
                         continue
+                    row_idx = bl_ij + tt*ms.n_bls
                     prms = self.params[jant] - prmsi
-                    phase_mod = prms[0]+M_PI2*(prms[1]/self.tunit*(ms.time[tini+tt]-ms.time[tini])
+                    phase_mod = prms[0]+M_PI2*(prms[1]/self.tunit*(ms.time[tt]-ms.time[tini])
                                              + prms[2]/self.funit*(ms.freq-ms.freq[0]))
                     G_ff_inv = np.exp(-1j*phase_mod)
-
-                    row_idx = ms.order_bls[bl_ij] + tt*ms.n_bls
                     for ii in range(temp_vis.shape[-1]):
                         calibrated_vis[row_idx, :, ii] = temp_vis[row_idx, :, ii]*G_ff_inv
                     calibrated_mod[row_idx] = np.angle(G_ff_inv)
 
-        Tab_out = Tab_cal.query(query=f"DATA_DESC_ID == {ms.SpW}", offset=t_offset, limit=t_limit, columns="CALIBRATED_DATA,CALIBRATED_MODEL")
-        Tab_out.putcol('CALIBRATED_DATA', calibrated_vis)
-        Tab_out.putcol('CALIBRATED_MODEL', calibrated_mod)
-        Tab_out.close()
+        Tab_cal.putcol('CALIBRATED_DATA', calibrated_vis, startrow=t_offset, nrow=t_limit)
+        Tab_cal.putcol('CALIBRATED_MODEL', calibrated_mod, startrow=t_offset, nrow=t_limit)
+ 
         Tab_cal.close()
-
-        # new_blij = ms.order_bls[baseline_ij(0, 10, ms.selfbls)]
-        # print(new_blij)
-        # plt.imshow(np.angle(calibrated_vis[new_blij::ms.n_bls, :, 0]).T, cmap="twilight", vmin=-np.pi, vmax=np.pi, aspect="auto", origin="lower")
-        # plt.show()
-        # plt.imshow(calibrated_mod[new_blij::ms.n_bls, :].T, cmap="twilight", vmin=-np.pi, vmax=np.pi, aspect="auto", origin="lower")
-        # plt.show()
 
         del temp_vis, temp_flg, calibrated_vis, calibrated_mod
 
@@ -711,49 +629,25 @@ if __name__ == "__main__":
     print("\n     *** FRINGE FITTING CODE ***\n\n")
     # Path to the MeasurementSet (MS)
     data_MS = "../Data/ILTJ125911.17+351954.5_143MHz_uv.dp3-concat"
-    # data_MS     = "../Data/n24l2.ms"
 
-    refant      = 0
-    npol        = [0, 3]
-    nSpW        = 0
-    tintervals  = 8
-    nscaleg     = 8
-    LSM         = False
-    selfbls     = False
-    vlbi        = "lofar"
-    uvrange     = 7e4
-    ms_data     = LOAD_MS(data_MS, npol=npol, SpW=nSpW, refant=refant, tints=tintervals, selfbls=selfbls, vlbi=vlbi)
+    refant = 0
+    npol = [0,3]
+    tintervals = 8
+    nscaleg = 16
+    LSM = False
+    ms_data = LOAD_MS(data_MS, npol=npol, refant=refant)
+    nt_loc = ms_data.nt // tintervals
 
     #### START MAIN LOOP
-    for tint in range(ms_data.tints):
-        print(f"\n---> Time interval = {tint+1}/{ms_data.tints}")
-        tini = ms_data.time_edgs[tint]
-        tend = ms_data.time_edgs[tint+1]
-        print(f"Time steps: {tend-tini}\n")
-        ms_data.flag_baselines(tini, tend, uvrange = uvrange)
-
-        #### PLOT FLAGGED DATA
-        baseline_test = np.zeros([ms_data.nant, ms_data.nant])
-
-        for ii in range(ms_data.nant):
-            for jj in range(ii+1, ms_data.nant):
-                blij = baseline_ij(ii, jj, ms_data.selfbls)
-                baseline_test[ii, jj] = ms_data.baseline_ok[blij]
-                baseline_test[jj, ii] = ms_data.baseline_ok[blij]
-
-        plt.figure(figsize=(8, 6))
-        plt.imshow(baseline_test, origin='lower')
-        plt.xlabel("Antenna 2")
-        plt.ylabel("Antenna 1")
-        plt.colorbar(label='% Flagged Data')
-        plt.grid(False)
-        plt.show()
-
-        ##########################
-
+    
+    for tint in range(tintervals):
+        print(f"\n---> Time interval = {tint+1}/{tintervals}\n")
+        tini = tint *nt_loc
+        tend = ms_data.nt if tint == (tintervals-1) else (tint + 1) * nt_loc
+        ms_data.flag_baselines(tini, tend)
         ms_data.load_data(tini, tend, corrcomb=2)
 
-        Global_FF = FringeFitting(ms_data, nscale=nscaleg)
+        Global_FF = FringeFitting(ms_data, tints=tintervals, nscale=nscaleg)
         Global_FF.FFT_init_global(ms_data, tint)
         print("TIME: ", tm.time()-INI_TIME)
 
@@ -761,9 +655,27 @@ if __name__ == "__main__":
             Global_FF.LSM_FF(ms_data, tint, maxiter=1)
             print("TIME: ", tm.time()-INI_TIME)
 
-        Global_FF.calibrate(tini, tend, ms_data, model=True)
+        Global_FF.calibrate(tini, tend, ms_data, tint, model=True)
 
         print("TIME: ", tm.time()-INI_TIME)
+
+    # END MAIN LOOP
+
+    baseline_test = np.zeros([ms_data.nant, ms_data.nant])
+
+    for ii in range(ms_data.nant):
+        for jj in range(ii+1, ms_data.nant):
+            blij = (jj*(jj-1))//2 + ii
+            baseline_test[ii, jj] = ms_data.baseline_ok[blij]
+            baseline_test[jj, ii] = ms_data.baseline_ok[blij]
+
+    plt.figure(figsize=(8, 6))
+    plt.imshow(baseline_test, origin='lower')
+    plt.xlabel("Antenna 2")
+    plt.ylabel("Antenna 1")
+    plt.colorbar(label='% Flagged Data')
+    plt.grid(False)
+    plt.show()
  
     plt.figure(figsize=(8, 6))
     # for tint in range(Global_FF.tints):
@@ -788,4 +700,5 @@ if __name__ == "__main__":
     plt.show()
 
     ms_data.close()
+
     print('\n           *** END ***\n')

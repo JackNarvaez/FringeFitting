@@ -7,6 +7,7 @@ using fringe fitting techniques to calculate phase, rate, and delay
 based on Fast Fourier Transforms and Least Squares Minimization.
 """
 
+import time as tm
 import numpy as np
 import matplotlib.pyplot as plt
 from casacore.tables     import table
@@ -26,6 +27,16 @@ def SNR(dataFFT):
     """
 
     return np.max(dataFFT)/np.mean(dataFFT)
+
+def snr_aips(peak, xcount_):
+    if (peak > 0.999*xcount_):
+        peak = 0.999*xcount_
+        print("peak > 0.999*sumw_")
+
+    x = np.pi/2 *peak/xcount_
+    # The magic numbers in the following formula are from AIPS FRING
+    cwt = (np.tan(x)**1.163) * np.sqrt(xcount_)
+    return cwt
 
 def FFT_guess(vis, nscale, nt_sub, nf):
     """
@@ -50,10 +61,17 @@ def FFT_guess(vis, nscale, nt_sub, nf):
 
     r_max_idx, tau_max_idx = np.unravel_index(np.argmax(power_sub), power_sub.shape)
     phi0 = np.angle(F_sub[r_max_idx, tau_max_idx])
-    snr_ = SNR(power_sub)
+    #snr_ = SNR(power_sub)
+    shp = power_sub.shape
+    xcount_ = shp[0]*shp[1]
+    snr_ = snr_aips(np.abs(F_sub[r_max_idx, tau_max_idx]), xcount_)
     return phi0, r_max_idx, tau_max_idx, snr_
 
-def S3(vis_loc, time, freq, prms0, prms1):
+def wrap_phase(phase):
+        """Fast phase wrapping"""
+        return ((phase + np.pi) % (2 * np.pi)) - np.pi
+
+def S3(vis_loc, time, freq, prms):
     """
     Compute the sum-of-squares cost function between model and measured visibilities.
 
@@ -67,25 +85,14 @@ def S3(vis_loc, time, freq, prms0, prms1):
     Returns:
         float: Sum of squared phase errors.
     """
-
-    prms0[0]  = (prms0[0] +np.pi)%(2*np.pi) - np.pi
-    prms1[0]  = (prms1[0] +np.pi)%(2*np.pi) - np.pi
     
-    phi0_0= prms0[0]
-    r_0   = prms0[1]
-    tau_0 = prms0[2]
-
-    phi0_1= prms1[0]
-    r_1   = prms1[1]
-    tau_1 = prms1[2]
+    phi0  = wrap_phase(prms[0])
+    r     = prms[1]/tunit
+    tau   = prms[2]/funit
     
-    phi0  = (phi0_1-phi0_0+np.pi)%(2*np.pi) - np.pi
-    r     = (r_1-r_0)/tunit
-    tau   = (tau_1-tau_0)/funit
-    
-    Dt    = time[:, np.newaxis] - time[0]
+    Dt    = time - time[0]
     Df    = freq - freq[0]
-    Eijk  = np.exp(1j*(phi0 + 2*np.pi*(r*Dt + tau*Df)))
+    Eijk  = np.exp(1j*(phi0 + 2*np.pi*np.add.outer(r*Dt,tau*Df)))
     S2_t  = np.abs(vis_loc-Eijk)**2
     S     = np.sum(S2_t)
     return S
@@ -102,13 +109,15 @@ def objective(prms, vis_01, vis_02, vis_12, time, freq):
     Returns:
         float: Sum of squared residuals across all three baselines.
     """
-
-    S_01 = S3(vis_01, time, freq, prms[0:3], prms[3:6])
-    S_02 = S3(vis_02, time, freq, prms[0:3], prms[6:9])
-    S_12 = S3(vis_12, time, freq, prms[3:6], prms[6:9])
+    prms0 = prms[3:6]-prms[0:3]
+    prms1 = prms[6:9]-prms[0:3]
+    prms2 = prms[6:9]-prms[3:6]
+    S_01 = S3(vis_01, time, freq, prms0)
+    S_02 = S3(vis_02, time, freq, prms1)
+    S_12 = S3(vis_12, time, freq, prms2)
     return S_01+S_02+S_12
 
-def calibrate(vis_global, vis_cal, prms0, prms1, time, freq, intvals_t, ttt):
+def calibrate(vis_global, vis_cal, prms0, prms1, time, freq, intvals_t, ttt, model=False):
     """
     Apply phase correction to global visibilities.
 
@@ -124,6 +133,7 @@ def calibrate(vis_global, vis_cal, prms0, prms1, time, freq, intvals_t, ttt):
     """
 
     prms = prms1 - prms0
+    vis_model = np.zeros_like(vis_global)
     for tint in range(intvals_t):
         tt1 = tint*ttt
         tt2 = tt1+ttt
@@ -132,6 +142,10 @@ def calibrate(vis_global, vis_cal, prms0, prms1, time, freq, intvals_t, ttt):
         nt_sub = tt2+1-tt1
         G_ff_inv = np.exp(-1j*(prms[tint, 0]+2*np.pi*(prms[tint, 1]/tunit*(time[tt1:tt2+1, np.newaxis]-time[tt1]) + prms[tint, 2]/funit*(freq-freq[0]))))
         vis_cal[tt1:tt2+1] = vis_global[tt1:tt2+1]*G_ff_inv 
+        vis_model[tt1:tt2+1] = G_ff_inv
+    if model:
+        return vis_model
+
 
 def plot_phase(vis_global, time, freq, BL="01", showw=False):
     """
@@ -145,7 +159,6 @@ def plot_phase(vis_global, time, freq, BL="01", showw=False):
     """
 
     phase_global = np.angle(vis_global)
-    abs_glb_ph = np.abs(phase_global)
 
     # Create figure and grid layout
     fig = plt.figure(figsize=(10, 6))
@@ -154,27 +167,44 @@ def plot_phase(vis_global, time, freq, BL="01", showw=False):
                 wspace=0.05, hspace=0.05)
 
     ax_top = fig.add_subplot(gs[0, 0])
-    ax_top.plot(time, np.std(abs_glb_ph, axis=1), ".", color='purple')
+    ax_top.plot(time, np.std(phase_global, axis=1), ".", color='purple')
     ax_top.set_xlim(time[0], time[-1])
     ax_top.set_ylabel("STD")
     ax_top.set_xticks([])
 
-    ax_top2 = fig.add_subplot(gs[1, 0])
-    ax_top2.plot(time, np.mean(abs_glb_ph, axis=1), ".", color='purple')
-    ax_top2.set_ylabel("MEAN")
+    ax_top2     = fig.add_subplot(gs[1, 0])
+    time_rep    = np.repeat(time[:, np.newaxis], phase_global.shape[1], axis=1).flatten()
+    nbins_phase = 100
+
+    ax_top2.hist2d(
+        time_rep, phase_global.flatten(),
+        bins=[nt//4, nbins_phase],
+        range=[[time[0], time[-1]], [-np.pi, np.pi]],
+        cmap='viridis', cmin=1
+    )
+
+    ax_top2.set_ylabel("Phase")
     ax_top2.set_xlim(time[0], time[-1])
     ax_top2.set_ylim(-np.pi, np.pi)
     ax_top2.set_xticks([])
 
     ax_right = fig.add_subplot(gs[2, 2])
-    ax_right.plot(np.std(abs_glb_ph,axis=0), freq, ".", color='green')
+    ax_right.plot(np.std(phase_global,axis=0), freq, ".", color='green')
     ax_right.set_ylim(freq[0], freq[-1])
     ax_right.set_xlabel("STD")
     ax_right.set_yticks([])
 
     ax_right2 = fig.add_subplot(gs[2, 1])
-    ax_right2.plot(np.mean(abs_glb_ph,axis=0), freq, ".", color='green')
-    ax_right2.set_xlabel("MEAN")
+    freq_rep    = np.repeat(freq[np.newaxis, :], phase_global.shape[0], axis=0).flatten()
+
+    ax_right2.hist2d(
+        phase_global.flatten(), freq_rep,
+        bins=[nbins_phase, nf],
+        range=[[-np.pi, np.pi], [freq[0], freq[-1]]],
+        cmap='viridis', cmin=1
+    )
+
+    ax_right2.set_xlabel("Phase")
     ax_right2.set_ylim(freq[0], freq[-1])
     ax_right2.set_xlim(-np.pi, np.pi)
     ax_right2.set_yticks([])
@@ -190,7 +220,7 @@ def plot_phase(vis_global, time, freq, BL="01", showw=False):
         plt.show()
 
 ########## LOAD DATA ##########
-data_MS = "./Data/ILTJ125911.17+351954.5_143MHz_uv.dp3-concat"
+data_MS = "../Data/ILTJ125911.17+351954.5_143MHz_uv.dp3-concat"
 
 data    = table(data_MS)
 time    = np.unique(data.getcol("TIME"))
@@ -205,7 +235,7 @@ nf      = len(freq)
 spectral_window.close()
 
 ########## PARAMETERS ##########
-nscale  = 8
+nscale  = 4
 nant    = 3
 
 #3 Baselines: 01 - 12 - 02
@@ -216,7 +246,7 @@ r[-1]   = r[0] + r[1]
 tau[-1] = tau[0] + tau[1]
 phi0[-1]= np.angle(np.exp(1j*(phi0[0] + phi0[1])))
 
-noise   = 0
+noise   = 1
 lsm     = True
 tunit   = 1e3
 funit   = 1e9
@@ -270,6 +300,7 @@ for tint in range(intvals_t):
     snr_bef[tint, 2]   = SNR(pwr_l)
 
 ########## Least-Squares Minimization ##########
+INI_TIME = tm.time()
 if lsm:
     lsm_imp = np.zeros(intvals_t)
     for tint in range(intvals_t):
@@ -281,15 +312,21 @@ if lsm:
         time_new    = np.linspace(time[tt1], time[tt2], nt_sub)
         x0 = params[:, tint].flatten()
         S0      = objective(x0, vis_global_01[tt1:tt2+1], vis_global_02[tt1:tt2+1], vis_global_12[tt1:tt2+1], time_new, freq)
-        result  = minimize(objective, x0, args=(vis_global_01[tt1:tt2+1], vis_global_02[tt1:tt2+1], vis_global_12[tt1:tt2+1], time_new, freq), method='L-BFGS-B', options={'maxiter':10})
+        bounds = []
+        for i in range(nant):
+            bounds.extend([(-np.pi, np.pi), (None, None), (None, None)])  # phi0, r, tau
+            
+        result  = minimize(objective, x0, args=(vis_global_01[tt1:tt2+1], vis_global_02[tt1:tt2+1], vis_global_12[tt1:tt2+1], time_new, freq), method='L-BFGS-B', bounds=bounds, options={'maxiter':500})
         params[:, tint] = result.x.reshape(3, 3)
         ST = result.fun
         lsm_imp[tint] = 100*(1.-ST/S0)
 
+print("TIME: ", tm.time()-INI_TIME)
+
 ######### Calibrate phase #########
-calibrate(vis_global_01, vis_cal_01, params[0], params[1], time, freq, intvals_t, ttt)
-calibrate(vis_global_02, vis_cal_02, params[0], params[2], time, freq, intvals_t, ttt)
-calibrate(vis_global_12, vis_cal_12, params[1], params[2], time, freq, intvals_t, ttt)
+model_01 = calibrate(vis_global_01, vis_cal_01, params[0], params[1], time, freq, intvals_t, ttt, model=True)
+model_02 = calibrate(vis_global_02, vis_cal_02, params[0], params[2], time, freq, intvals_t, ttt, model=True)
+model_12 = calibrate(vis_global_12, vis_cal_12, params[1], params[2], time, freq, intvals_t, ttt, model=True)
 
 
 ##########  Final SNR ##########
@@ -322,7 +359,11 @@ for tint in range(intvals_t):
 
 plot_phase(vis_global_01, time, freq, BL="01", showw=False)
 plot_phase(vis_global_02, time, freq, BL="02", showw=False)
-plot_phase(vis_global_01, time, freq, BL="12", showw=True)
+plot_phase(vis_global_01, time, freq, BL="12", showw=False)
+
+plot_phase(model_01, time, freq, BL="01", showw=False)
+plot_phase(model_02, time, freq, BL="02", showw=False)
+plot_phase(model_01, time, freq, BL="12", showw=True)
 
 plot_phase(vis_cal_01, time, freq, BL="01", showw=False)
 plot_phase(vis_cal_02, time, freq, BL="02", showw=False)
