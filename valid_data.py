@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 from casacore.tables     import table
 
 # Path to the MeasurementSet (MS)
-data_MS = "./Data/ILTJ125911.17+351954.5_143MHz_uv.dp3-concat"
+data_MS = "../Data/ILTJ125911.17+351954.5_143MHz_uv.dp3-concat"
 
 # Open MS
 data = table(data_MS)

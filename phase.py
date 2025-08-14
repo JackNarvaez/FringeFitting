@@ -4,8 +4,9 @@ from casacore.tables     import table
 from matplotlib.gridspec import GridSpec
 
 # Path to the MeasurementSet (MS)
-data_MS  = "../Data/n24l2.ms"
-#data_MS = "../Data/ILTJ125911.17+351954.5_143MHz_uv.dp3-concat"
+# data_MS  = "../Data/n24l2.ms"
+data_MS = "../Data/ILTJ125911.17+351954.5_143MHz_uv.dp3-concat"
+# data_MS  = "../Data/ILTJ123441.23+314159.4_141MHz_uv.dp3-concat"
 
 # Open MS
 data = table(data_MS)
@@ -26,12 +27,14 @@ spectral_window.close()
 
 antennas = table(data_MS+"/ANTENNA")
 nameant  = antennas.getcol("NAME")
+antpos   = antennas.getcol("POSITION")
+print(antennas.getcoldesc("POSITION")['keywords']['QuantumUnits'][0])
 nant     = len(nameant)
 antennas.close()
 
-ant1    = 0
-ant2    = 10
-nSpW    = 1
+ant1    = 11
+ant2    = 26
+nSpW    = 0
 
 if (ant1 >= ant2):
     print(f"Error: Ant1: {ant1} must be smaller than Ant2: {ant2}")
@@ -58,7 +61,7 @@ phase = np.angle(vis)#-np.angle(vis_mod)
 print(time.shape, freq.shape, phase.shape)
 # Create figure and grid layout
 fig = plt.figure(figsize=(12, 8))
-fig.suptitle(f"Baseline {nameant[ant1]}-{nameant[ant2]}" + fr"   uv$[\lambda]$ = {uvw_mean:.0f}", fontsize=16, y=0.98)
+fig.suptitle(f"Baseline {nameant[ant1]}-{nameant[ant2]}" + fr"   uv$[\lambda]$ = {uvw_mean:.0f}  - {np.linalg.norm(antpos[ant2] - antpos[ant1])}", fontsize=16, y=0.98)
 gs = GridSpec(2, 2, width_ratios=[4, 1], height_ratios=[1, 4],
               wspace=0.05, hspace=0.05)
 

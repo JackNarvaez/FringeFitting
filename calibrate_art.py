@@ -13,79 +13,27 @@ import matplotlib.pyplot as plt
 from casacore.tables     import table
 from matplotlib.gridspec import GridSpec
 from numpy.fft           import fftshift, fft2, fftfreq
-from scipy.optimize      import minimize
-
-def SNR(dataFFT):
-    """
-    Compute the Signal-to-Noise Ratio (SNR).
-
-    Parameters:
-        dataFFT (ndarray): 2D array representing the FFT power spectrum.
-
-    Returns:
-        float: Ratio of the peak value to the mean, i.e., max / mean.
-    """
-
-    return np.max(dataFFT)/np.mean(dataFFT)
-
-def snr_aips(peak, xcount_):
-    if (peak > 0.999*xcount_):
-        peak = 0.999*xcount_
-        print("peak > 0.999*sumw_")
-
-    x = np.pi/2 *peak/xcount_
-    # The magic numbers in the following formula are from AIPS FRING
-    cwt = (np.tan(x)**1.163) * np.sqrt(xcount_)
-    return cwt
+from scipy.optimize      import minimize, least_squares, differential_evolution
+from GlobalFF import SNR, snr_aips, wrap_phase
 
 def FFT_guess(vis, nscale, nt_sub, nf):
-    """
-    Estimate initial fringe parameters (phase, rate, delay) using 2D FFT.
-
-    Parameters:
-        vis (ndarray): Subset of visibility data (time x frequency).
-        nscale (int): Zero-padding scale factor for FFT.
-        nt_sub (int): Number of time samples in the sub-block.
-        nf (int): Number of frequency channels.
-
-    Returns:
-        tuple: (phi0, r_idx, tau_idx, snr) where:
-            phi0 (float): Estimated phase offset.
-            r_idx (int): Index of fringe rate peak.
-            tau_idx (int): Index of delay peak.
-            snr (float): Signal-to-noise ratio of the FFT.
-    """
 
     F_sub  = fftshift(fft2(vis, norm='ortho', s=[nscale*nt_sub, nscale*nf]))
     power_sub = np.abs(F_sub)
+    dimm = power_sub.shape
 
-    r_max_idx, tau_max_idx = np.unravel_index(np.argmax(power_sub), power_sub.shape)
+    power_sub[dimm[0]//2, :] = 0.0
+    power_sub[:, dimm[1]//2] = 0.0
+
+    r_max_idx, tau_max_idx = np.unravel_index(np.argmax(power_sub), dimm)
     phi0 = np.angle(F_sub[r_max_idx, tau_max_idx])
-    #snr_ = SNR(power_sub)
-    shp = power_sub.shape
-    xcount_ = shp[0]*shp[1]
+
+    xcount_ = dimm[0]*dimm[1]
     snr_ = snr_aips(np.abs(F_sub[r_max_idx, tau_max_idx]), xcount_)
     return phi0, r_max_idx, tau_max_idx, snr_
 
-def wrap_phase(phase):
-        """Fast phase wrapping"""
-        return ((phase + np.pi) % (2 * np.pi)) - np.pi
-
 def S3(vis_loc, time, freq, prms):
-    """
-    Compute the sum-of-squares cost function between model and measured visibilities.
 
-    Parameters:
-        vis_loc (ndarray): Observed visibility data for a baseline.
-        time (ndarray): Time array (1D).
-        freq (ndarray): Frequency array (1D).
-        prms0 (array): Parameters (phi0, r, tau) of antenna 0.
-        prms1 (array): Parameters of antenna 1.
-
-    Returns:
-        float: Sum of squared phase errors.
-    """
-    
     phi0  = wrap_phase(prms[0])
     r     = prms[1]/tunit
     tau   = prms[2]/funit
@@ -98,17 +46,6 @@ def S3(vis_loc, time, freq, prms):
     return S
 
 def objective(prms, vis_01, vis_02, vis_12, time, freq):
-    """
-    Cost function for least-squares optimization of fringe parameters across all baselines.
-
-    Parameters:
-        prms (ndarray): Flattened array of parameters [phi0, r, tau] for all antennas.
-        vis_01, vis_02, vis_12 (ndarray): Visibilities for the three baselines.
-        time, freq (ndarray): Time and frequency axes.
-
-    Returns:
-        float: Sum of squared residuals across all three baselines.
-    """
     prms0 = prms[3:6]-prms[0:3]
     prms1 = prms[6:9]-prms[0:3]
     prms2 = prms[6:9]-prms[3:6]
@@ -235,12 +172,12 @@ nf      = len(freq)
 spectral_window.close()
 
 ########## PARAMETERS ##########
-nscale  = 4
+nscale  = 8
 nant    = 3
 
 #3 Baselines: 01 - 12 - 02
-r       = np.array([1e-3, 1.5e-3, 0.0])  # 1e-3 = Hz 1 ms
-tau     = np.array([1e-7, 3e-7, 0.0])    # 1e-9 = 1 ns
+r       = np.array([30e-3, 1.5e-3, 0.0])  # 1e-3 = Hz 1 ms
+tau     = np.array([1e-7, 300e-7, 0.0])    # 1e-9 = 1 ns
 phi0    = np.array([0.0, -np.pi/3, 0.0])
 r[-1]   = r[0] + r[1]
 tau[-1] = tau[0] + tau[1]
@@ -301,8 +238,11 @@ for tint in range(intvals_t):
 
 ########## Least-Squares Minimization ##########
 INI_TIME = tm.time()
+
+print((-1/dt*tunit, -1/dt*tunit), (-1/df*funit, 1/df*funit))
 if lsm:
     lsm_imp = np.zeros(intvals_t)
+    lsm_err = np.zeros(intvals_t)
     for tint in range(intvals_t):
         tt1 = tint*ttt
         tt2 = tt1+ttt
@@ -313,13 +253,23 @@ if lsm:
         x0 = params[:, tint].flatten()
         S0      = objective(x0, vis_global_01[tt1:tt2+1], vis_global_02[tt1:tt2+1], vis_global_12[tt1:tt2+1], time_new, freq)
         bounds = []
+        # low_bounds = []
+        # up_bounds = []
         for i in range(nant):
-            bounds.extend([(-np.pi, np.pi), (None, None), (None, None)])  # phi0, r, tau
+            bounds.extend([(-np.pi, np.pi), (-1/dt*tunit, 1/dt*tunit), (-1/df*funit, 1/df*funit)])  # phi0, r, tau
+            # low_bounds.extend([-np.pi,-1/dt*tunit,-1/df*funit])  # phi0, r, tau
+            # up_bounds.extend([np.pi, 1/dt*tunit, 1/df*funit])  # phi0, r, tau
             
-        result  = minimize(objective, x0, args=(vis_global_01[tt1:tt2+1], vis_global_02[tt1:tt2+1], vis_global_12[tt1:tt2+1], time_new, freq), method='L-BFGS-B', bounds=bounds, options={'maxiter':500})
+        result  = minimize(objective, x0, args=(vis_global_01[tt1:tt2+1], vis_global_02[tt1:tt2+1], vis_global_12[tt1:tt2+1], time_new, freq), method='L-BFGS-B', bounds=bounds, options={'maxiter':100})
+        # result  = least_squares(objective, x0, args=(vis_global_01[tt1:tt2+1], vis_global_02[tt1:tt2+1], vis_global_12[tt1:tt2+1], time_new, freq), bounds=(low_bounds, up_bounds), max_nfev=100)
+        # result  = differential_evolution(objective, x0=x0, bounds=bounds, args=(vis_global_01[tt1:tt2+1], vis_global_02[tt1:tt2+1], vis_global_12[tt1:tt2+1], time_new, freq), maxiter=10)
+        
         params[:, tint] = result.x.reshape(3, 3)
         ST = result.fun
         lsm_imp[tint] = 100*(1.-ST/S0)
+        lsm_err[tint] = objective(result.x, vis_global_01[tt1:tt2+1], vis_global_02[tt1:tt2+1], vis_global_12[tt1:tt2+1], time_new, freq)
+
+        print(ST, lsm_err[tint])
 
 print("TIME: ", tm.time()-INI_TIME)
 
@@ -353,9 +303,9 @@ for tint in range(intvals_t):
     snr_aft[tint, 2]   = SNR(pwr_l)
 
 #### Plot Results
-
-for tint in range(intvals_t):
-    print(f"Interval: {tint}\t Imp. LSM: {lsm_imp[tint]:.5f} % \t Init. SNR: {np.mean(snr_bef[tint]):.3f}\tFinal SNR: {np.mean(snr_aft[tint]):.3f}")
+if lsm:
+    for tint in range(intvals_t):
+        print(f"Interval: {tint}\t Imp. LSM: {lsm_imp[tint]:.5f} % \t Imp. Err: {100*(1.-lsm_err[tint]/S0):.1f} \t Init. SNR: {np.mean(snr_bef[tint]):.3f}\tFinal SNR: {np.mean(snr_aft[tint]):.3f}")
 
 plot_phase(vis_global_01, time, freq, BL="01", showw=False)
 plot_phase(vis_global_02, time, freq, BL="02", showw=False)

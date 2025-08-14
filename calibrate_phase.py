@@ -5,13 +5,7 @@ from casacore.tables     import table
 from matplotlib.gridspec import GridSpec
 from numpy.fft           import fftshift, fft2, fftfreq
 from scipy.optimize      import minimize
-
-def SNR(dataFFT):
-    return np.max(dataFFT)/np.mean(dataFFT)
-
-def wrap_phase(phase):
-        """Fast phase wrapping"""
-        return ((phase + np.pi) % (2 * np.pi)) - np.pi
+from GlobalFF import wrap_phase, SNR
 
 def S3(vis_loc, wgt_loc, time, freq, params):
     phi0  = wrap_phase(params[0])
@@ -28,8 +22,10 @@ def objective(params, vis_loc, wgt_loc, time, freq):
     return S3(vis_loc, wgt_loc, time, freq, params)
 
 # Path to the MeasurementSet (MS)
-#data_MS = "../Data/ILTJ125911.17+351954.5_143MHz_uv.dp3-concat"
-data_MS = "../Data/n24l2.ms"
+data_MS = "../Data/ILTJ125911.17+351954.5_143MHz_uv.dp3-concat"
+# data_MS  = "../Data/ILTJ123441.23+314159.4_141MHz_uv.dp3-concat"
+
+# data_MS = "../Data/n24l2.ms"
 
 data    = table(data_MS)
 n_pol   = 0
@@ -48,26 +44,27 @@ spectral_window.close()
 antennas = table(data_MS+"/ANTENNA")
 nameant  = antennas.getcol("NAME")
 nant     = len(nameant)
-nbls     = (nant*(nant+1))//2
+nbls     = (nant*(nant-1))//2
 antennas.close()
 
 nscale   = 8
-ant1     = 0
-ant2     = 10
-lsm      = False
+ant1     = 10
+ant2     = 26
+lsm      = True
 tunit    = 1e3
 funit    = 1e9
-nSpW     = 1
+nSpW     = 0
 
-# if (ant1 >= ant2):
-#     print(f"Error: Ant1: {ant1} must be smaller than Ant2: {ant1}")
-#     exit()
+if (ant1 >= ant2):
+    print(f"Error: Ant1: {ant1} must be smaller than Ant2: {ant1}")
+    exit()
 
 t1  = data.query(f'DATA_DESC_ID == {nSpW} AND ANTENNA1 == {ant1} AND ANTENNA2 == {ant2}')   # do row selection
 # print(t1.nrows(), data.nrows()/4/(nbls+nant))
 data.close()
 
 vis_global = 0.5*(t1.getcol('DATA')[:, :, 0] + t1.getcol('DATA')[:, :, 3])
+# mod_global = 0.5*(t1.getcol('MODEL_DATA')[:, :, 0] + t1.getcol('MODEL_DATA')[:, :, 3])
 flg_global = t1.getcol('FLAG')[:, :, 0]* t1.getcol('FLAG')[:, :, 3]
 
 if "WEIGHT_SPECTRUM" in t1.colnames():
@@ -81,6 +78,7 @@ if lsm:
     wgt_global[flg_global] = 0.0
 vis_global[flg_global] = 0.0
 phase_global = np.angle(vis_global)
+# model_global = np.angle(mod_global)
 
 dim_nt, dimf = flg_global.shape
 print("Flagged data:", np.sum(flg_global)/(dim_nt*dimf)*100)
@@ -98,7 +96,7 @@ tindex.append(nt)
 
 Numdivs = len(tindex)-1
 
-if (Numdivs > 1):
+if (Numdivs > 1) and (Numdivs<3*intvals_t):
     intvals_t = Numdivs
     time_edgs = tindex
 else:
@@ -130,7 +128,7 @@ for tint in range(intvals_t):
             ff2 = nf-1
         if (tint == 0):
             freq_edgs[fint] = freq[ff2]
-        vis = vis_global[tt1:tt2, ff1:ff2+1]   # (channel, pol [RR, RL, LR, LL])
+        vis = np.exp(1j*(phase_global[tt1:tt2, ff1:ff2+1]))# - model_global[tt1:tt2, ff1:ff2+1]))   # (channel, pol [RR, RL, LR, LL])
         print(vis.shape)
         if False:
             plt.figure(figsize=(8, 6))
@@ -196,6 +194,7 @@ for tint in range(intvals_t):
             params0 = params[tint, fint].copy()
             S0      = S3(vis, wgt, time_new, freq_new,params0)
             result  = minimize(objective, params[tint, fint], args=(vis, wgt, time_new, freq_new), method='L-BFGS-B', options={'maxiter':100})
+            print(params[tint, fint], result.x)
             params[tint, fint] = result.x
             S1 = result.fun
             print(f"{params0[0]:.5f}\t\t{params0[1]:.5f}\t\t{params0[2]:.5f}")
@@ -285,5 +284,8 @@ def plot_phase(vis_global, time, freq, wgt=None, BL="01", showw=False):
         plt.show()
 
 vis_cal[flg_global] = 0.0
+# final_vis = np.exp(1j*(phase_global-model_global))
 plot_phase(vis_global, time, freq, wgt=wgt_global, BL=f"{nameant[ant1]}-{nameant[ant2]} VIS", showw=False)
+# plot_phase(mod_global, time, freq, wgt=wgt_global, BL=f"{nameant[ant1]}-{nameant[ant2]} MOD", showw=False)
+# plot_phase(final_vis, time, freq, wgt=wgt_global, BL=f"{nameant[ant1]}-{nameant[ant2]} VIS-MOD", showw=False)
 plot_phase(vis_cal, time, freq, wgt=wgt_global, BL=f"{nameant[ant1]}-{nameant[ant2]} CAL", showw=True)
