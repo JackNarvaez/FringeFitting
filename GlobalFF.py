@@ -1,3 +1,11 @@
+"""
+Fringe Fitting
+===============
+
+This program performs phase calibration using fringe fitting 
+techniques to calculate phase, rate, and delay.
+"""
+
 import numpy as np
 import gc
 import time as tm
@@ -6,10 +14,9 @@ from casacore.tables     import table, makearrcoldesc, maketabdesc
 from matplotlib.gridspec import GridSpec
 from scipy.fft           import fftshift, fft2, fftfreq
 from scipy.optimize      import least_squares, differential_evolution
-from matplotlib import rcParams
+from matplotlib          import rcParams
 
 plt.style.use('dark_background')
-
 
 rcParams.update({
     "font.size": 20,
@@ -36,11 +43,11 @@ M_PI2   = 2*np.pi
 M_PIP2  = np.pi/2
 
 def wrap_phase(phase):
-    """Fast phase wrapping"""
+    """Phase wrapping"""
     return ((phase + M_PI) % (M_PI2)) - M_PI
 
 def snr_aips(peak, sumw_, sumww_, xcount_):
-    """Estimate signal-to-noise ratio based on AIPS formula."""
+    """Estimate signal-to-noise ratio based on magic AIPS formula."""
     if (peak > 0.999*sumw_):
         peak = 0.999*sumw_
         print("peak > 0.999*sumw_")
@@ -68,122 +75,185 @@ def baseline_ij(ant1, ant2, sgn):
         if sgn>0:
             return (ant1*(ant1+sgn))//2 + ant2
         else:
-            print(f"Error: Ant1: {ant1} must be different to Ant2: {ant2}")
-            exit()
+            raise ValueError(f"Ant1 ({ant1}) must be different from Ant2 ({ant2})")
 
-def plot_phase(phase, wgt_glb, time, freq, nbins_time, nbins_freq, nbins_phase = 50, Baselinetitle="", showw=False, savef=False):
-        fig = plt.figure(figsize=(12, 7))
-        fig.suptitle(f"{Baselinetitle}")
-        gs  = GridSpec(3, 3, width_ratios=[8, 1, 1], height_ratios=[1, 1, 4],
-                    wspace=0.05, hspace=0.05)
+def plot_phase(
+    phase,
+    wgt_glb,
+    time,
+    freq,
+    nbins_time,
+    nbins_freq,
+    nbins_phase = 50,
+    Baselinetitle="",
+    showw=False,
+    savef=False
+):
+    """
+    Plot phase statistics and distributions of visibility data.
 
-        ax_top = fig.add_subplot(gs[0, 0])
-        ax_top.plot(time, np.std(phase, axis=1), ".", ms=1, color="forestgreen")
-        ax_top.set_xlim(time[0], time[-1])
-        ax_top.set_ylabel("std")
-        ax_top.tick_params(
-            axis='y',
-            left=True,
-            right=True,
-            labelleft=False,
-            labelright=True,
-            direction='in'
-        )
-        ax_top.set_ylim(0, M_PI)
-        ax_top.set_xticklabels([])
-        ax_top.set_yticks([0, np.pi])
-        ax_top.set_yticklabels([0, r"$\pi$"])
+    This function creates a multi-panel figure showing:
+      1. Standard deviation of phase vs. time       (top-left).
+      2. 2D histogram of phase vs. time             (middle-left).
+      3. Standard deviation of phase vs. frequency  (bottom-right).
+      4. 2D histogram of phase vs. frequency        (middle-right).
+      5. Main plot: phase vs (time, frequency)      (bottom-left).
 
-        ax_top2     = fig.add_subplot(gs[1, 0])
-        time_rep    = np.repeat(time[:, np.newaxis], phase.shape[1], axis=1).flatten()
+    Parameters
+    ----------
+    phase : ndarray, shape (ntime, nfreq)
+        Phase values in radians. Missing data should be NaN.
+    wgt_glb : ndarray or None
+        Optional weights (same shape as `phase`) to apply in histograms.
+        If None, histograms are unweighted.
+    time : ndarray, shape (ntime,)
+        Time values in hours (or consistent units).
+    freq : ndarray, shape (nfreq,)
+        Frequency values in Hz.
+    nbins_time : int
+        Number of bins along the time axis for histograms.
+    nbins_freq : int
+        Number of bins along the frequency axis for histograms.
+    nbins_phase : int, optional
+        Number of bins along the phase axis for histograms. Default is 50.
+    Baselinetitle : str, optional
+        Title for the figure (e.g., baseline identifier).
+    showw : bool, optional
+        If True, display the figure interactively.
+    savef : bool, optional
+        If True, save the figure as a PNG file using Baselinetitle as filename.
 
-        if wgt_glb is not None:
-            wgt = wgt_glb.flatten()
-        else:
-            wgt=None
+    Notes
+    -----
+    - Uses `M_PI` (assumed to be `np.pi`) for axis limits.
+    - Frequencies are converted to MHz in the main heatmap.
+    - Missing values in `phase` are shown as black in the main plot.
+    """
+    fig = plt.figure(figsize=(14, 7))
+    fig.suptitle(f"{Baselinetitle}")
+    gs = GridSpec(3, 4, width_ratios=[8, 1, 1, 0.3], height_ratios=[1, 1, 4],
+                  wspace=0.05, hspace=0.05)
 
-        ax_top2.hist2d(
-            time_rep, phase.flatten(),
-            weights = wgt,
-            bins=[nbins_time, nbins_phase],
-            range=[[time[0], time[-1]], [-M_PI, M_PI]],
-            cmap='plasma', cmin=1
-        )
+    # ---------- Top panel: Phase std vs. time ----------
+    ax_top = fig.add_subplot(gs[0, 0])
+    ax_top.plot(time, np.std(phase, axis=1), ".", ms=1, color="forestgreen")
+    ax_top.set_xlim(time[0], time[-1])
+    ax_top.set_ylabel("std")
+    ax_top.tick_params(
+        axis='y',
+        left=True,
+        right=True,
+        labelleft=False,
+        labelright=True,
+        direction='in'
+    )
+    ax_top.set_ylim(0, M_PI)
+    ax_top.set_xticklabels([])
+    ax_top.set_yticks([0, np.pi])
+    ax_top.set_yticklabels([0, r"$\pi$"])
 
-        ax_top2.set_ylabel("phase")
-        ax_top2.set_xlim(time[0], time[-1])
-        ax_top2.set_ylim(-M_PI, M_PI)
-        ax_top2.set_xticklabels([])
-        ax_top2.set_yticks([-np.pi, 0, np.pi])
-        ax_top2.set_yticklabels([r"$-\pi$", 0, r"$\pi$"])
+    time_rep    = np.repeat(time[:, None], phase.shape[1], axis=1).flatten()
+    wgt = wgt_glb.flatten() if wgt_glb is not None else None
 
-        ax_right = fig.add_subplot(gs[2, 2])
-        ax_right.plot(np.std(phase,axis=0), freq, ".", ms=5, color='green')
-        ax_right.set_ylim(freq[0], freq[-1])
-        ax_right.set_xlabel("std")
+    # ---------- Middle-left panel: Phase vs. time 2D histogram ----------
+    ax_top2     = fig.add_subplot(gs[1, 0])
+    ax_top2.hist2d(
+        time_rep, phase.flatten(),
+        weights = wgt,
+        bins=[nbins_time, nbins_phase],
+        range=[[time[0], time[-1]], [-M_PI, M_PI]],
+        cmap='plasma', cmin=1
+    )
+    ax_top2.set_ylabel("phase")
+    ax_top2.set_xlim(time[0], time[-1])
+    ax_top2.set_ylim(-M_PI, M_PI)
+    ax_top2.set_xticklabels([])
+    ax_top2.set_yticks([-np.pi, 0, np.pi])
+    ax_top2.set_yticklabels([r"$-\pi$", 0, r"$\pi$"])
 
-        ax_right.tick_params(
-            axis='x',
-            bottom=True,
-            top=True,
-            labelbottom=False,
-            labeltop=True,
-            direction='in'
-        )
-        ax_right.set_xlim(0, M_PI)
-        ax_right.set_yticklabels([])
-        ax_right.set_xticks([0, np.pi])
-        ax_right.set_xticklabels([0, r"$\pi$"])
+    # ---------- Bottom-right panel: Phase std vs. frequency ----------
+    ax_right = fig.add_subplot(gs[2, 2])
+    ax_right.plot(np.std(phase,axis=0), freq, ".", ms=5, color='green')
+    ax_right.set_ylim(freq[0], freq[-1])
+    ax_right.set_xlabel("std")
+    ax_right.tick_params(
+        axis='x',
+        bottom=True,
+        top=True,
+        labelbottom=False,
+        labeltop=True,
+        direction='in'
+    )
+    ax_right.set_xlim(0, M_PI)
+    ax_right.set_yticklabels([])
+    ax_right.set_xticks([0, np.pi])
+    ax_right.set_xticklabels([0, r"$\pi$"])
 
-        ax_right2 = fig.add_subplot(gs[2, 1])
-        freq_rep    = np.repeat(freq[np.newaxis, :], phase.shape[0], axis=0).flatten()
-        ax_right2.hist2d(
-            phase.flatten(), freq_rep,
-            weights = wgt,
-            bins=[nbins_phase, nbins_freq],
-            range=[[-M_PI, M_PI], [freq[0], freq[-1]]],
-            cmap='plasma', cmin=1
-        )
+    freq_rep    = np.repeat(freq[np.newaxis, :], phase.shape[0], axis=0).flatten()
 
-        ax_right2.set_xlabel("phase")
-        ax_right2.set_ylim(freq[0], freq[-1])
-        ax_right2.set_xlim(-M_PI, M_PI)
-        ax_right2.set_yticklabels([])
-        ax_right2.set_xticks([-np.pi, 0, np.pi])
-        ax_right2.set_xticklabels([r"$-\pi$", 0, r"$\pi$"])
+    # ---------- Middle-right panel: Phase vs. frequency 2D histogram ----------
+    ax_right2 = fig.add_subplot(gs[2, 1])
+    ax_right2.hist2d(
+        phase.flatten(), freq_rep,
+        weights = wgt,
+        bins=[nbins_phase, nbins_freq],
+        range=[[-M_PI, M_PI], [freq[0], freq[-1]]],
+        cmap='plasma', cmin=1
+    )
+    ax_right2.set_xlabel("phase")
+    ax_right2.set_ylim(freq[0], freq[-1])
+    ax_right2.set_xlim(-M_PI, M_PI)
+    ax_right2.set_yticklabels([])
+    ax_right2.set_xticks([-np.pi, 0, np.pi])
+    ax_right2.set_xticklabels([r"$-\pi$", 0, r"$\pi$"])
 
-        ax_main = fig.add_subplot(gs[2, 0])
+    # ---------- Bottom-left panel: Main time-frequency phase heatmap ----------
+    ax_main = fig.add_subplot(gs[2, 0])
 
-        # ax_main.imshow(phase.T, aspect='auto', origin='lower', vmax=M_PI, vmin=-M_PI,
-        #                 extent=[time[0], time[-1], freq[0]/1e6, freq[-1]/1e6],
-        #                 cmap='twilight')
+    # Fill in missing times with NaNs for pcolormesh compatibility
+    # Maybe it's not the best way to do it, but it does work. To be improved!
+    dt = np.min(np.diff(time))
+    time_full = np.arange(time.min(), time.max() + dt, dt)
+    phase_full = np.full((time_full.size, phase.shape[1]), np.nan)
+    idx_map = np.searchsorted(time_full, time)
+    phase_full[idx_map, :] = phase
 
-        dt = np.min(np.diff(time))
-        time_full = np.arange(time.min(), time.max() + dt, dt)
-        phase_full = np.full((time_full.size, phase.shape[1]), np.nan)
+    T, F = np.meshgrid(time_full, freq)
+    phase_masked = np.ma.masked_invalid(phase_full.T)
 
-        idx_map = np.searchsorted(time_full, time)
-        phase_full[idx_map, :] = phase
+    cmap = plt.cm.twilight
+    cmap.set_bad(color='black')
+    pcm = ax_main.pcolormesh(T, F/1e6, phase_masked,
+                     cmap=cmap, vmin=-M_PI, vmax=M_PI,
+                     shading='auto')    
+    plt.xlabel("Time (h)")
+    plt.ylabel("Frequency (MHz)")
 
-        T, F = np.meshgrid(time_full, freq)
-        phase_masked = np.ma.masked_invalid(phase_full.T)
+    # --- Add colorbar for the main phase plot ---
+    cax = fig.add_subplot(gs[2, 3])
+    cbar = fig.colorbar(pcm, cax=cax)
+    cbar.set_label("phase (rad)")
+    cbar.set_ticks([-np.pi, -np.pi/2, 0, np.pi/2, np.pi])
+    cbar.set_ticklabels([r"$-\pi$", "", "0", "", r"$\pi$"])
 
-        cmap = plt.cm.twilight
-        cmap.set_bad(color='black')
-
-        pcm = ax_main.pcolormesh(T, F/1e6, phase_masked,
-                         cmap=cmap, vmin=-M_PI, vmax=M_PI,
-                         shading='auto')
-        
-        plt.xlabel("Time (h)")
-        plt.ylabel("Frequency (MHz)")
-        if savef:
-            plt.savefig(Baselinetitle + ".png", dpi=500, transparent=True)
-        if showw:
-            plt.show()
+    if savef:
+        plt.savefig(Baselinetitle + ".png", dpi=500, transparent=True)
+    if showw:
+        plt.show()
 
 class LOAD_MS:
-    def __init__(self, ms_path, npol=0, SpW=0, refant=0, tints=8, selfbls=False, vlbi="lofar", model=False, bl_based=False):
+    def __init__(
+        self,
+        ms_path,
+        npol    = 0,
+        SpW     = 0,
+        refant  = 0,
+        tints   = 8,
+        selfbls = False,
+        vlbi    = "lofar",
+        model   = False,
+        bl_based=False
+    ):
         self.ms_path = ms_path
         self.n_pol   = npol
 
@@ -260,7 +330,9 @@ class LOAD_MS:
             print("VLBI MS Format: lofar")
         elif self.vlbi=="evn":
             print("VLBI MS Format: evn")
-            Tab = self.data.query(query=f"DATA_DESC_ID == {self.SpW}", offset=0, limit=self.n_bls, columns="ANTENNA1,ANTENNA2")
+            Tab = self.data.query(
+                query=f"DATA_DESC_ID == {self.SpW}", offset=0, limit=self.n_bls, columns="ANTENNA1,ANTENNA2"
+                )
             antenna1 = Tab.getcol('ANTENNA1')
             antenna2 = Tab.getcol('ANTENNA2')
             Tab.close()
@@ -273,7 +345,18 @@ class LOAD_MS:
     def close(self):
         self.data.close()
     
-    def load_baseline(self, ant1, ant2, npol=0, Data=True, Wgt=True, Cal=False, calmod=False, Model=False, fld=0):
+    def load_baseline(
+        self,
+        ant1,
+        ant2,
+        npol    = 0,
+        Data    = True,
+        Wgt     = True,
+        Cal     = False,
+        calmod  = False,
+        Model   = False,
+        fld     = 0
+    ):
         if (ant1 > ant2):
             print(f"Error: Ant1: {ant1} must be smaller than Ant2: {ant2}")
             exit()
@@ -281,7 +364,9 @@ class LOAD_MS:
             if self.selfbls < 0:
                 print(f"Error: Ant1: {ant1} must be different to Ant2: {ant2}")
                 exit()
-        t1   = self.data.query(f'DATA_DESC_ID == {self.SpW} AND FIELD_ID == {fld} AND ANTENNA1 == {ant1} AND ANTENNA2 == {ant2}')
+        t1   = self.data.query(
+            f'DATA_DESC_ID == {self.SpW} AND FIELD_ID == {fld} AND ANTENNA1 == {ant1} AND ANTENNA2 == {ant2}'
+            )
         flg  = t1.getcol('FLAG')[:, :, npol]
 
         results = []
@@ -314,7 +399,13 @@ class LOAD_MS:
 
         return tuple(results)
 
-    def flag_baselines(self, tini, tend, flagged_threshold = 0.6, uvrange = 2e4):
+    def flag_baselines(
+        self,
+        tini,
+        tend,
+        flagged_threshold = 0.6,
+        uvrange = 2e4
+    ):
         print("\n ------- FLAGGING DATA ------- ")
         print(f"flagged_threshold = {flagged_threshold:.2f}")
         print(f"uvrange_threshold = {uvrange:.2f}")
@@ -373,7 +464,6 @@ class LOAD_MS:
 
     def load_data(self, tini, tend, corrcomb=0):
         tloc = tend-tini
-        ntot = self.nf*tloc
         t_offset = tini*self.n_bls
         t_limit  = tloc*self.n_bls
 
@@ -392,7 +482,9 @@ class LOAD_MS:
         if self.vlbi=="evn":
             cols = cols + ',ANTENNA1,ANTENNA2'
 
-        Tab = self.data.query(f"DATA_DESC_ID == {self.SpW}", offset=t_offset, limit=t_limit, columns=cols)
+        Tab = self.data.query(
+            f"DATA_DESC_ID == {self.SpW}", offset=t_offset, limit=t_limit, columns=cols
+            )
 
         NRows = Tab.nrows()
         if (NRows != tloc*self.n_bls):
@@ -485,8 +577,16 @@ class LOAD_MS:
             del model_data
         gc.collect()
 
-    def plot_phase_local(self, ant1, ant2, tini, tend, vis_cal=None, vis_wgt=None, showw=False):
-
+    def plot_phase_local(
+        self,
+        ant1,
+        ant2,
+        tini,
+        tend,
+        vis_cal = None,
+        vis_wgt = None,
+        showw   = False
+    ):
         baseline = baseline_ij(ant1, ant2, self.selfbls)
         tloc = tend-tini
         time_loc = self.time[tini:tend]
@@ -505,22 +605,76 @@ class LOAD_MS:
         plot_phase(phase_global, wgt_global, time_loc, self.freq,\
                    nbins_time=len(time_loc), nbins_freq=self.nf, nbins_phase = 50, Baselinetitle=baselinetitle, showw=showw)
 
-    def plot_phase_global(self, ant1, ant2, npol, Model=False, tunits = 3600, savef=False, fld=0):
+    def plot_phase_global(
+        self,
+        ant1,
+        ant2,
+        npol,
+        Model   = False,
+        tunits  = 3600,
+        savef   = False,
+        fld     = 0
+    ):
+        """
+        Plot phase diagnostics for a given antenna pair (baseline).
+
+        This function loads visibility data for a baseline, optionally with multiple
+        polarizations and a model, and generates phase plots for:
+            - Original data
+            - Calibrated data
+            - Model data (if available)
+
+        The plots are generated using `plot_phase()` and show phase evolution 
+        across time and frequency, along with statistical summaries.
+
+        Parameters
+        ----------
+        ant1, ant2 : int
+            Indices of the two antennas forming the baseline.
+        npol : list or str
+            Polarization(s) to load. If a single polarization is given, it is
+            processed directly. If two polarizations are given, they are averaged.
+        Model : bool, optional
+            If True, subtracts the model phase from the observed and calibrated data.
+        tunits : float, optional
+            Time unit conversion factor for the x-axis (default: 3600 for hours).
+        savef : bool, optional
+            If True, saves the plots.
+        fld : int, optional
+            Field ID to select from the measurement set.
+        """
+        # Compute baseline length (meters) from antenna positions
         baseline_d = np.linalg.norm(self.posant[ant2] - self.posant[ant1])
+
+        # --- Single-polarization case ---
         if len(npol)==1:
             print(f"1 Pol: {npol}")
-            vis_global, wgt_global, cal_global, mod_phase = self.load_baseline(ant1, ant2, npol=npol, Data=True, Wgt=True, Cal=True, calmod=True, fld=fld)
+            vis_global, wgt_global, cal_global, mod_phase = self.load_baseline(
+                ant1, ant2, npol=npol, Data=True, Wgt=True, Cal=True, calmod=True, fld=fld
+            )
             if Model:
-                vis_model = self.load_baseline(ant1, ant2, npol=npol, Data=False, Wgt=False, Cal=False, calmod=False, Model=Model, fld=fld)
+                vis_model = self.load_baseline(
+                    ant1, ant2, npol=npol, Data=False, Wgt=False, Cal=False, calmod=False, Model=Model, fld=fld
+                )
+        
+        # --- Dual-polarization case (average two polarizations) ---
         else:
-            vis_global1, wgt_global1, cal_global1, mod_phase = self.load_baseline(ant1, ant2, npol=npol[0], Data=True, Wgt=True, Cal=True, calmod=True, fld=fld)
-            vis_global2, wgt_global2, cal_global2 = self.load_baseline(ant1, ant2, npol=npol[1], Data=True, Wgt=True, Cal=True, calmod=False, fld=fld)
+            vis_global1, wgt_global1, cal_global1, mod_phase = self.load_baseline(
+                ant1, ant2, npol=npol[0], Data=True, Wgt=True, Cal=True, calmod=True, fld=fld
+            )
+            vis_global2, wgt_global2, cal_global2 = self.load_baseline(
+                ant1, ant2, npol=npol[1], Data=True, Wgt=True, Cal=True, calmod=False, fld=fld
+            )
             vis_global = 0.5*(vis_global1+vis_global2)
             cal_global = 0.5*(cal_global1+cal_global2)
             wgt_global = 0.5*(wgt_global1+wgt_global2)
             if Model:
-                vis_model1 = self.load_baseline(ant1, ant2, npol=npol[0], Data=False, Wgt=False, Cal=False, calmod=False, Model=Model, fld=fld)[0]
-                vis_model2 = self.load_baseline(ant1, ant2, npol=npol[1], Data=False, Wgt=False, Cal=False, calmod=False, Model=Model, fld=fld)[0]
+                vis_model1 = self.load_baseline(
+                    ant1, ant2, npol=npol[0], Data=False, Wgt=False, Cal=False, calmod=False, Model=Model, fld=fld
+                )[0]
+                vis_model2 = self.load_baseline(
+                    ant1, ant2, npol=npol[1], Data=False, Wgt=False, Cal=False, calmod=False, Model=Model, fld=fld
+                )[0]
                 vis_model = 0.5*(vis_model1+vis_model2)
         
         vis_phase = np.angle(vis_global)
@@ -542,8 +696,46 @@ class LOAD_MS:
         plot_phase(mod_phase, None, time/tunits, self.freq,\
                    nbins_time=self.nt, nbins_freq=self.nf, nbins_phase = 50, Baselinetitle=baselinetitle + " [Model]", showw=True, savef=savef)
 
+    def plot_global(
+        self,
+        ant1,
+        ant2,
+        Ftr     = "DATA",
+        tunits  = 3600,
+        savef   = False,
+        fld     = 0
+    ):
+        cols = Ftr+",WEIGHT_SPECTRUM,FLAG"
+        t1   = self.data.query(
+            f'DATA_DESC_ID == {self.SpW} AND FIELD_ID == {fld} AND ANTENNA1 == {ant1} AND ANTENNA2 == {ant2}', columns=cols)
+        xx  = t1.getcol(Ftr)[:, :, 0]
+        yy  = t1.getcol(Ftr)[:, :, 3]
+        wx  = t1.getcol("WEIGHT_SPECTRUM")[:, :, 0]
+        wy  = t1.getcol("WEIGHT_SPECTRUM")[:, :, 3]
+        fx  = t1.getcol("FLAG")[:, :, 0]
+        fy  = t1.getcol("FLAG")[:, :, 3]
+
+        vis_phase = np.angle(0.5*(xx+yy))
+        vis_wgt   = 0.5*(wx+wy)
+
+        t1.close()
+
+        temp = self.data.query(f'DATA_DESC_ID == {self.SpW} AND FIELD_ID == {fld} AND ANTENNA1 == {ant1} AND ANTENNA2 == {ant2}', columns="TIME")
+        time = np.unique(temp.getcol('TIME'))
+        time -= time[0]
+        temp.close()
+
+        plot_phase(vis_phase, vis_wgt, time/tunits, self.freq,\
+                   nbins_time=self.nt, nbins_freq=self.nf, nbins_phase = 50, showw=True, savef=savef)
+
 class FringeFitting:
-    def __init__(self, ms, nscale=8, tunit=1e3, funit=1e9):
+    def __init__(
+        self,
+        ms,
+        nscale  = 8,
+        tunit   = 1e3,
+        funit   = 1e9
+    ):
         """
         ms: LOAD_MS class object
         nscale: padding factor for FFT
@@ -565,7 +757,14 @@ class FringeFitting:
         self.min_rate  = self.tunit * 0.5/(ms.time[ms.time_edgs[1]] - ms.time[ms.time_edgs[0]])
         self.max_rate  = self.tunit * 0.5/ms.dt
 
-    def FFT_init_ij(self, ms, ant, nt_loc, fringe_rate, delay):
+    def FFT_init_ij(
+        self,
+        ms,
+        ant,
+        nt_loc,
+        fringe_rate,
+        delay
+    ):
         """Compute fringe-rate, delay, and phase estimates over time-frequency blocks."""
 
         ant1, ant2 = (ant, ms.refant) if ms.refant > ant else (ms.refant, ant)
@@ -985,22 +1184,22 @@ if __name__ == "__main__":
     print("\n     *** FRINGE FITTING CODE ***\n\n")
     # Path to the MeasurementSet (MS)
     # data_MS = "../Data/ILTJ123441.23+314159.4_141MHz_uv.dp3-concat"
-    # data_MS = "../Data/ILTJ125911.17+351954.5_143MHz_uv.dp3-concat"
-    data_MS = "../Data/ILTJ131028.61+322045.7_143MHz_uv.dp3-concat"
+    data_MS = "../Data/ILTJ125911.17+351954.5_143MHz_uv.dp3-concat"
+    # data_MS = "../Data/ILTJ131028.61+322045.7_143MHz_uv.dp3-concat"
     # data_MS = "../Data/n24l2.ms"
 
-    refant      = 24
+    refant      = 26
     npol        = [0, 3]
     nSpW        = 0
-    tintervals  = 16
+    tintervals  = 80
     nscaleg     = 64
     LSM         = False
     lsm_        = "local"
     selfbls     = False
     vlbi        = "lofar"
-    uvrange     = 2e4
-    modl        = True
-    Bl_based    = True
+    uvrange     = 1e5
+    modl        = False
+    Bl_based    = False
 
     # refant      = 2
     # npol        = [0, 3]
@@ -1085,5 +1284,3 @@ if __name__ == "__main__":
 
     ms_data.close()
     print('\n                   *** END ***\n')
-    print('Come back tomorrow Buddy...')
-    print('...perhabs the code will work smoothly by then :V\n')
